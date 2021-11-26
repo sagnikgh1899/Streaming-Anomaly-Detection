@@ -1,0 +1,2218 @@
+//#pragma once
+
+#include <iostream>
+#include <queue>
+#include <algorithm>
+#include <string>
+#include <vector>
+#include <random>
+#include <fstream>
+#include <chrono>
+
+using namespace std;
+
+
+#define DIST_SAME_INSTANCE		0.1
+
+class LOF {
+protected:
+	int K = 0;
+	int NUM_DATA_POINTS = 0;
+	int DIM_DATA_POINT = 0;
+	float THRESHOLD = 0;
+
+	float** reachDist = NULL;
+	float* lrd = NULL;
+
+	void clear(const bool CLEAR_OUTLIERS);
+	void initialize(Dataset& dataset, const bool CLEAR_OUTLIERS);
+	void createDistMatrix(Dataset& dataset);
+	void createKNNMatrix();
+	void createKNNMatrix(const int INDEX);
+	float computeKDist(const int INDEX);
+	float computeReachDist(const int TARGET_INDEX, const int ANOTHER_INDEX);
+	float computeLRD(const int INDEX);
+	float computeLOF(const int INDEX);
+
+public:
+	float** distMatrix = NULL;
+	int** knnMatrix = NULL;
+	float* kDist = NULL;
+	float* lof = NULL;
+	vector<int> outliersId;
+
+	LOF(LOFConfiguration& conf);
+	~LOF();
+	int getNumOutliers();
+	void run(Dataset& dataset, const bool CLEAR_OUTLIERS = true, const bool CHECK_OUTLIER = true);
+};
+
+void LOF::clear(const bool CLEAR_OUTLIERS) {
+	delete[] kDist;
+	delete[] lrd;
+	delete[] lof;
+	Mem::delete2D<float>(distMatrix, NUM_DATA_POINTS);
+	Mem::delete2D<int>(knnMatrix, NUM_DATA_POINTS);
+	Mem::delete2D<float>(reachDist, NUM_DATA_POINTS);
+
+	if (CLEAR_OUTLIERS) {
+		outliersId.clear();
+	}
+}
+
+void LOF::initialize(Dataset& dataset, const bool CLEAR_OUTLIERS) {
+	clear(CLEAR_OUTLIERS);
+
+	DIM_DATA_POINT = dataset.getDimDataVector();
+	NUM_DATA_POINTS = dataset.getNumInstances();
+
+	kDist = new float[NUM_DATA_POINTS];
+	lrd = new float[NUM_DATA_POINTS];
+	lof = new float[NUM_DATA_POINTS];
+
+	Mem::alloc2D<float>(distMatrix, NUM_DATA_POINTS, NUM_DATA_POINTS);
+	Mem::alloc2D<int>(knnMatrix, NUM_DATA_POINTS, this->K);
+	Mem::alloc2D<float>(reachDist, NUM_DATA_POINTS, NUM_DATA_POINTS);
+
+	Arr::set<float>(distMatrix, NUM_DATA_POINTS, NUM_DATA_POINTS, -1);
+	Arr::set<int>(knnMatrix, NUM_DATA_POINTS, this->K, -1);
+}
+
+void LOF::createDistMatrix(Dataset& dataset) {
+	float** dataVectors = NULL;
+
+	dataset.getDataVectors(dataVectors);
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		for (int j = 0; j < NUM_DATA_POINTS; j++) {
+			if (i == j) {
+				distMatrix[i][j] = 0;
+				continue;
+			}
+
+			if (distMatrix[j][i] == -1.0f) {
+				distMatrix[i][j] = Math::eucDist<float>(dataVectors[i], dataVectors[j], DIM_DATA_POINT);
+				if (distMatrix[i][j] == 0) {
+					distMatrix[i][j] = (float)DIST_SAME_INSTANCE;
+				}
+			}
+			else {
+				distMatrix[i][j] = distMatrix[j][i];
+			}
+		}
+	}
+
+	delete[] dataVectors;
+}
+
+void LOF::createKNNMatrix() {
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		for (int j = 0; j < NUM_DATA_POINTS; j++) {
+			if (j == i) {
+				continue;
+			}
+
+			for (int k = 0; k < K; k++) {
+				if (knnMatrix[i][k] == -1) {
+					knnMatrix[i][k] = j;
+					break;
+				}
+				else {
+					if (distMatrix[i][j] < distMatrix[i][knnMatrix[i][k]]) {
+						for (int q = K - 2; q >= k; q--) {
+							knnMatrix[i][q + 1] = knnMatrix[i][q];
+						}
+						knnMatrix[i][k] = j;
+						break;
+					}
+				}
+			}
+		}
+	}
+}
+
+void LOF::createKNNMatrix(const int INDEX) {
+	for (int j = 0; j < NUM_DATA_POINTS; j++) {
+		if (j == INDEX) {
+			continue;
+		}
+
+		for (int k = 0; k < K; k++) {
+			if (knnMatrix[INDEX][k] == -1) {
+				knnMatrix[INDEX][k] = j;
+				break;
+			}
+			else {
+				if (distMatrix[INDEX][j] < distMatrix[INDEX][knnMatrix[INDEX][k]]) {
+					for (int q = K - 2; q >= k; q--) {
+						knnMatrix[INDEX][q + 1] = knnMatrix[INDEX][q];
+					}
+					knnMatrix[INDEX][k] = j;
+					break;
+				}
+			}
+		}
+	}
+}
+
+float LOF::computeKDist(const int INDEX) {
+	return distMatrix[INDEX][knnMatrix[INDEX][K - 1]];
+}
+
+float LOF::computeReachDist(const int TARGET_INDEX, const int ANOTHER_INDEX) {
+	if (kDist[ANOTHER_INDEX] > distMatrix[TARGET_INDEX][ANOTHER_INDEX]) {
+		return kDist[ANOTHER_INDEX];
+	}
+	else {
+		return distMatrix[TARGET_INDEX][ANOTHER_INDEX];
+	}
+}
+
+float LOF::computeLRD(const int INDEX) {
+	float sumReachDistances = 0;
+
+	for (int i = 0; i < K; i++) {
+		sumReachDistances += reachDist[INDEX][knnMatrix[INDEX][i]];
+	}
+
+	return K / sumReachDistances;
+}
+
+float LOF::computeLOF(const int INDEX) {
+	float sumLRD = 0;
+
+	for (int i = 0; i < K; i++) {
+		sumLRD += lrd[knnMatrix[INDEX][i]];
+	}
+
+	return (sumLRD / (float)K) / lrd[INDEX];
+}
+
+LOF::LOF(LOFConfiguration& conf) {
+	this->DIM_DATA_POINT = conf.DIM_DATA_POINT;
+	this->K = conf.K;
+	this->THRESHOLD = conf.THRESHOLD;
+}
+
+LOF::~LOF() {
+	clear(true);
+}
+
+int LOF::getNumOutliers() {
+	return (int)outliersId.size();
+}
+
+void LOF::run(Dataset& dataset, const bool CLEAR_OUTLIERS, const bool CHECK_OUTLIER) {
+	initialize(dataset, CLEAR_OUTLIERS);
+
+	createDistMatrix(dataset);
+	createKNNMatrix();
+
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		kDist[i] = computeKDist(i);
+	}
+
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		for (int j = 0; j < K; j++) {
+			reachDist[i][knnMatrix[i][j]] = computeReachDist(i, knnMatrix[i][j]);
+		}
+	}
+
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		lrd[i] = computeLRD(i);
+	}
+
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		lof[i] = computeLOF(i);
+	}
+
+	if (CHECK_OUTLIER) {
+		for (int i = 0; i < NUM_DATA_POINTS; i++) {
+			if (lof[i] > THRESHOLD) {
+				outliersId.push_back(dataset.instances[i]->id);
+			}
+		}
+	}
+}
+
+
+class Instance {
+protected:
+	int DIM_DATA_VECTOR = 0;
+	int DIM_TARGET_VECTOR = 0;
+
+	void setLabel();
+
+public:
+	int id = -1;
+	int label = -1;
+	float* dataVector = NULL;
+	float* targetVector = NULL;
+
+	Instance(const int DIM_DATA_VECTOR, const int DIM_TARGET_VECTOR, const int ID = -1);
+	Instance(float* dataVector, const int DIM_DATA_VECTOR, float* targetVector, const int DIM_TARGET_VECTOR, const int ID = -1);
+	Instance(Instance* instance);
+	~Instance();
+	int getDimDataVector();
+	int getDimTargetVector();
+	void copy(Instance* instance);
+	void copy(const float* dataVector, const float* targetVector);
+	float eucDistDV(Instance* instance);
+	float eucDistTV(Instance* instance);
+	Tuple<int, float>* nearestInstance(Instance** INSTANCES, const int NUM);
+	Tuple<int, float>* furthermostInstance(Instance** INSTANCES, const int NUM);
+};
+
+void Instance::setLabel() {
+	for (int i = 0; i < DIM_TARGET_VECTOR; i++) {
+		if (targetVector[i] == 1) {
+			label = i;
+			return;
+		}
+	}
+}
+
+Instance::Instance(const int DIM_DATA_VECTOR, const int DIM_TARGET_VECTOR, const int ID) {
+	this->DIM_DATA_VECTOR = DIM_DATA_VECTOR;
+	this->DIM_TARGET_VECTOR = DIM_TARGET_VECTOR;
+	this->id = ID;
+	this->dataVector = new float[this->DIM_DATA_VECTOR];
+
+	if (this->DIM_TARGET_VECTOR > 0) {
+		this->targetVector = new float[this->DIM_TARGET_VECTOR];
+	}
+}
+
+Instance::Instance(float* dataVector, const int DIM_DATA_VECTOR, float* targetVector, const int DIM_TARGET_VECTOR, const int ID) {
+	this->DIM_DATA_VECTOR = DIM_DATA_VECTOR;
+	this->DIM_TARGET_VECTOR = DIM_TARGET_VECTOR;
+	this->id = ID;
+	this->dataVector = new float[this->DIM_DATA_VECTOR];
+	Arr::copy<float>(this->dataVector, dataVector, this->DIM_DATA_VECTOR);
+
+	if (targetVector != NULL) {
+		this->targetVector = new float[this->DIM_TARGET_VECTOR];
+		Arr::copy<float>(this->targetVector, targetVector, this->DIM_TARGET_VECTOR);
+		setLabel();
+	}
+}
+
+Instance::Instance(Instance* instance) {
+	this->DIM_DATA_VECTOR = instance->getDimDataVector();
+	this->DIM_TARGET_VECTOR = instance->getDimTargetVector();
+	this->id = instance->id;
+	this->label = instance->label;
+	this->dataVector = new float[this->DIM_DATA_VECTOR];
+
+	Arr::copy<float>(this->dataVector, instance->dataVector, this->DIM_DATA_VECTOR);
+
+	if (DIM_TARGET_VECTOR > 0) {
+		this->targetVector = new float[this->DIM_TARGET_VECTOR];
+		Arr::copy<float>(this->targetVector, instance->targetVector, this->DIM_TARGET_VECTOR);
+	}
+}
+
+Instance::~Instance() {
+	delete[] dataVector;
+	delete[] targetVector;
+}
+
+int Instance::getDimDataVector() {
+	return DIM_DATA_VECTOR;
+}
+
+int Instance::getDimTargetVector() {
+	return DIM_TARGET_VECTOR;
+}
+
+void Instance::copy(Instance* instance) {
+	Arr::copy<float>(dataVector, instance->dataVector, DIM_DATA_VECTOR);
+	Arr::copy<float>(targetVector, instance->targetVector, DIM_TARGET_VECTOR);
+	this->id = instance->id;
+	setLabel();
+}
+
+void Instance::copy(const float* dataVector, const float* targetVector) {
+	Arr::copy<float>(this->dataVector, dataVector, DIM_DATA_VECTOR);
+	Arr::copy<float>(this->targetVector, targetVector, DIM_TARGET_VECTOR);
+	setLabel();
+}
+
+float Instance::eucDistDV(Instance* instance) {
+	return Math::eucDist<float>(this->dataVector, instance->dataVector, DIM_DATA_VECTOR);
+}
+
+float Instance::eucDistTV(Instance* instance) {
+	return Math::eucDist<float>(this->targetVector, instance->targetVector, DIM_TARGET_VECTOR);
+}
+
+Tuple<int, float>* Instance::nearestInstance(Instance** INSTANCES, const int NUM) {
+	Tuple<int, float>* result = new Tuple<int, float>(-1, -1);
+	float minDist = this->eucDistDV(INSTANCES[0]);
+	int minDistIndex = 0;
+	float dist = 0;
+
+	for (int i = 1; i < NUM; i++) {
+		dist = this->eucDistDV(INSTANCES[i]);
+
+		if (dist < minDist) {
+			minDist = dist;
+			minDistIndex = i;
+		}
+	}
+
+	result->first = minDistIndex;
+	result->second = minDist;
+
+	return result;
+}
+
+Tuple<int, float>* Instance::furthermostInstance(Instance** INSTANCES, const int NUM) {
+	Tuple<int, float>* result = new Tuple<int, float>(-1, -1);
+	float maxDist = this->eucDistDV(INSTANCES[0]);
+	int maxDistIndex = 0;
+	float dist = 0;
+
+	for (int i = 1; i < NUM; i++) {
+		dist = this->eucDistDV(INSTANCES[i]);
+
+		if (dist > maxDist) {
+			maxDist = dist;
+			maxDistIndex = i;
+		}
+	}
+
+	result->first = maxDistIndex;
+	result->second = maxDist;
+
+	return result;
+}
+
+
+
+
+
+#define PI			3.14159265359
+#define EXP			2.71828182845
+#define EPSILON		0.000001
+
+class Math {
+public:
+	template <typename T> static void vectorAdd(T*& v1, const T* v2, const int DIM);
+	template <typename T> static void vectorAdd(T*& v, const T VAL, const int DIM);
+	template <typename T> static void vectorSub(T*& v1, const T* v2, const int DIM);
+	template <typename T> static void vectorSub(T*& v, const T VAL, const int DIM);
+	template <typename T> static void vectorMul(T*& v1, const T* v2, const int DIM);
+	template <typename T> static void vectorMul(T*& v, const T VAL, const int DIM);
+	template <typename T> static void vectorDiv(T*& v1, const T* v2, const int DIM);
+	template <typename T> static void vectorDiv(T*& v, const T VAL, const int DIM);
+	template <typename T> static float eucDist(const T* v1, const T* v2, const int DIM);
+	template <typename T> static float gravity(const T* v1, const int MASS_V1, const T* v2, const int MASS_V2, const int DIM);
+	template <typename T> static float EMD(const T** optFlow, const T** distances, const int SIZE_DIST1, const int SIZE_DIST2);
+	template <typename T> static float average(const T* data, const int NUM);
+	template <typename T> static float std(const T* data, const int NUM);
+	template <typename T> static T min(const T val1, const T val2);
+	template <typename T> static T max(const T val1, const T val2);
+	template <typename T> static float trapz(const T* pointsX, const T* pointsY, const int DIM);
+	template <typename T> static T gamma(const T VAL);
+	static float sigmoid(const float VAL);
+	static float tanH(const float VAL);
+};
+
+template <typename T>
+void Math::vectorAdd(T*& v1, const T* v2, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v1[i] = v1[i] + v2[i];
+	}
+}
+
+template <typename T>
+void Math::vectorAdd(T*& v, const T VAL, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v[i] = v[i] + VAL;
+	}
+}
+
+template <typename T>
+void Math::vectorSub(T*& v1, const T* v2, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v1[i] = v1[i] - v2[i];
+	}
+}
+
+template <typename T>
+void Math::vectorSub(T*& v, const T VAL, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v[i] = v[i] - VAL;
+	}
+}
+
+template <typename T>
+void Math::vectorMul(T*& v1, const T* v2, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v1[i] = v1[i] * v2[i];
+	}
+}
+
+template <typename T>
+void Math::vectorMul(T*& v, const T VAL, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v[i] = v[i] * VAL;
+	}
+}
+
+template <typename T>
+void Math::vectorDiv(T*& v1, const T* v2, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v1[i] = v1[i] / v2[i];
+	}
+}
+
+template <typename T>
+void Math::vectorDiv(T*& v, const T VAL, const int DIM) {
+	for (int i = 0; i < DIM; i++) {
+		v[i] = v[i] / VAL;
+	}
+}
+
+template <typename T>
+float Math::eucDist(const T* v1, const T* v2, const int DIM) {
+	float distance = 0;
+
+	for (int i = 0; i < DIM; i++) {
+		distance += (v1[i] - v2[i]) * (v1[i] - v2[i]);
+	}
+
+	return (float)std::sqrt(distance);
+}
+
+template <typename T>
+float Math::gravity(const T* v1, const int MASS_V1, const T* v2, const int MASS_V2, const int DIM) {
+	float distance = 0;
+
+	for (int i = 0; i < DIM; i++) {
+		distance += (v1[i] - v2[i]) * (v1[i] - v2[i]);
+	}
+
+	return (MASS_V1 * MASS_V2) / distance;
+}
+
+template <typename T>
+float Math::EMD(const T** optFlow, const T** distances, const int SIZE_DIST1, const int SIZE_DIST2) {
+	float sumFlow = 0;
+	float sumWork = 0;
+
+	for (int i = 0; i < SIZE_DIST1; i++) {
+		for (int j = 0; j < SIZE_DIST2; j++) {
+			sumFlow += optFlow[i][j];
+			sumWork += optFlow[i][j] * distances[i][j];
+		}
+	}
+
+	return sumWork / sumFlow;
+}
+
+template <typename T>
+float Math::average(const T* data, const int NUM) {
+	float sum = 0;
+
+	for (int i = 0; i < NUM; i++) {
+		sum += data[i];
+	}
+
+	return sum / (float)NUM;
+}
+
+template <typename T>
+float Math::std(const T* data, const int NUM) {
+	const float average = Math::average<T>(data, NUM);
+	float sum = 0;
+
+	for (int i = 0; i < NUM; i++) {
+		sum += (data[i] - average) * (data[i] - average);
+	}
+
+	return sqrt(sum / (float)NUM);
+}
+
+template <typename T>
+T Math::min(const T val1, const T val2) {
+	if (val1 < val2) {
+		return val1;
+	}
+	else {
+		return val2;
+	}
+}
+
+template <typename T>
+T Math::max(const T val1, const T val2) {
+	if (val1 > val2) {
+		return val1;
+	}
+	else {
+		return val2;
+	}
+}
+
+template <typename T>
+float Math::trapz(const T* pointsX, const T* pointsY, const int DIM) {
+	float sum = 0;
+
+	for (int i = 0; i < DIM - 1; i++) {
+		sum += abs((pointsX[i + 1] - pointsX[i])) * min<T>(pointsY[i], pointsY[i + 1]);
+		sum += (abs(pointsX[i + 1] - pointsX[i]) * abs(pointsY[i] - pointsY[i + 1])) / 2.0f;
+	}
+
+	return sum;
+}
+
+template <typename T>
+T Math::gamma(const T VAL) {
+	T result = 0;
+
+	if (floor(VAL) == VAL) {
+		result = 1;
+
+		for (int i = 2; i <= VAL; i++) {
+			result *= i;
+		}
+	}
+	else {
+		result = (T)(sqrt(2 * PI * VAL) * pow(VAL / EXP, VAL));
+	}
+
+	return result;
+}
+
+float Math::sigmoid(const float VAL) {
+	return 1 / (float)(1 + exp(-VAL));
+}
+
+float Math::tanH(const float VAL) {
+	return (2 / (float)(1 + exp(-2 * VAL))) - 1;
+}
+
+
+
+
+class Dataset {
+protected:
+	int TYPE = -1;
+	int DIM_DATA_VECTOR = 0;
+	int DIM_TARGET_VECTOR = 0;
+	int NUM_CLASSES = 0;
+	int NUM_NOISED_INSTANCES = 0;
+
+	void readDataFile(const string DATA_FILE_NAME, const string DELIMETER);
+	void readTestFile(const string TEST_FILE_NAME, const string DELIMETER);
+	string vectorToString(float* vector, const int DIM);
+
+public:
+	static const int LABELLED = 0;
+	static const int UNLABELLED = 1;
+	static const int TRAINING_SET = 0;
+	static const int TEST_SET = 1;
+
+	vector<Instance*> instances;
+	vector<Instance*> testInstances;
+	vector<int> noisedInstancesId;
+
+	Dataset() { };
+	Dataset(const int TYPE, const int DIM_DATA_VECTOR, const int DIM_TARGET_VECTOR, const int NUM_CLASSES);
+	Dataset(const int TYPE, const string DATA_FILE_NAME, const string DELIMETER);
+	Dataset(const int TYPE, const string DATA_FILE_NAME, const string TEST_DATA_FILE_NAME, const string DELIMETER);
+	Dataset(Dataset* dataset);
+	~Dataset();
+	void initialize(const int TYPE, const int DIM_DATA_VECTOR, const int DIM_TARGET_VECTOR, const int NUM_CLASSES);
+	void initialize(const int TYPE, const string DATA_FILE_NAME, const string DELIMETER);
+	void clear();
+	int getType();
+	int getNumInstances();
+	int getNumTestInstances();
+	int getNumNoisedInstances();
+	int getDimDataVector();
+	int getDimTargetVector();
+	int getNumClasses();
+	void getDataVectors(float**& dataVectors);
+	void getTargetVectors(float**& targetVectors);
+	int getInstancesIdByClass(int*& instancesId, const int INDEX_CLASS);
+	void addInstance(Instance* newInstance);
+	void addInstance(Instance* newInstance, const int POS);
+	void addInstanceCopy(Instance* newInstance);
+	void addInstanceCopy(Instance* newInstance, const int POS);
+	void addTestInstance(Instance* newInstance);
+	void addTestInstance(Instance* newInstance, const int POS);
+	void addTestInstanceCopy(Instance* newInstance);
+	void addTestInstanceCopy(Instance* newInstance, const int POS);
+	void removeInstance(const int POS);
+	void removeInstance(const int POS_START, const int POS_END);
+	void removeInstances(int* ARR, const int LEN);
+	void removeTestInstance(const int POS);
+	void removeTestInstance(const int POS_START, const int POS_END);
+	void removeTestInstances(int* ARR, const int LEN);
+	void normalize();
+	void shuffle();
+	void copy(Dataset* dataset);
+	void addUniformNoise(const float RATIO_PERCENT, const float MIN, const float MAX);
+	void addUniformNoise(const float RATIO_PERCENT);
+	void addGaussianNoise(const float RATIO_PERCENT, const float MEAN, const float STD);
+	int idToIndex(const int ID);
+	int indexToId(const int INDEX);
+	void splitTestDataset(const float RATIO);
+	void print();
+	void save(const string FILE_NAME);
+};
+
+void Dataset::readDataFile(const string DATA_FILE_NAME, const string DELIMETER) {
+	ifstream file(DATA_FILE_NAME);
+	string temp;
+	int numInstances= 0;
+	float* tempData = NULL;
+	float* dataVector = NULL;
+	float* targetVector = NULL;
+
+	getline(file, temp);
+	numInstances = Str::toInt(temp);
+
+	getline(file, temp);
+	DIM_DATA_VECTOR = Str::toInt(temp);
+
+	if (TYPE == LABELLED) {
+		getline(file, temp);
+		DIM_TARGET_VECTOR = Str::toInt(temp);
+
+		getline(file, temp);
+		NUM_CLASSES = Str::toInt(temp);
+	}
+	
+	for (int i = 0; i < numInstances; i++) {
+		dataVector = new float[DIM_DATA_VECTOR];
+		targetVector = new float[DIM_TARGET_VECTOR];
+
+		getline(file, temp);
+		Str::splitAsFloat(tempData, temp, DELIMETER);
+		Arr::copy<float>(dataVector, tempData, DIM_DATA_VECTOR);
+
+		if (TYPE == LABELLED) {
+			Arr::copy<float>(targetVector, &tempData[DIM_DATA_VECTOR], DIM_TARGET_VECTOR);
+		}
+
+		instances.push_back(new Instance(dataVector, DIM_DATA_VECTOR, targetVector, DIM_TARGET_VECTOR, i));
+
+		delete[] tempData;
+		delete[] dataVector;
+		delete[] targetVector;
+	}
+
+	file.close();
+}
+
+void Dataset::readTestFile(const string TEST_FILE_NAME, const string DELIMETER) {
+	ifstream file(TEST_FILE_NAME);
+	string temp;
+	int numTestInstances = 0;
+	float* tempData = NULL;
+
+	getline(file, temp);
+	numTestInstances = Str::toInt(temp);
+
+	for (int i = 0; i < numTestInstances; i++) {
+		Instance* instance = new Instance(DIM_DATA_VECTOR, DIM_TARGET_VECTOR, i);
+
+		getline(file, temp);
+		Str::splitAsFloat(tempData, temp, DELIMETER);
+		Arr::copy<float>(instance->dataVector, tempData, DIM_DATA_VECTOR);
+
+		if (TYPE == LABELLED) {
+			Arr::copy<float>(instance->targetVector, &tempData[DIM_DATA_VECTOR], DIM_TARGET_VECTOR);
+		}
+
+		testInstances.push_back(instance);
+
+		delete[] tempData;
+	}
+
+	file.close();
+}
+
+string Dataset::vectorToString(float* vector, const int DIM) {
+	string strVector = "";
+
+	for (int i = 0; i < DIM; i++) {
+		if (i < DIM - 1) {
+			strVector += to_string(vector[i]) + ",";
+		}
+		else {
+			strVector += to_string(vector[i]);
+		}
+	}
+
+	return strVector;
+}
+
+Dataset::Dataset(const int TYPE, const int DIM_DATA_VECTOR, const int DIM_TARGET_VECTOR, const int NUM_CLASSES) {
+	initialize(TYPE, DIM_DATA_VECTOR, DIM_TARGET_VECTOR, NUM_CLASSES);
+}
+
+Dataset::Dataset(const int TYPE, const string DATA_FILE_NAME, const string DELIMETER) {
+	this->TYPE = TYPE;
+
+	readDataFile(DATA_FILE_NAME, DELIMETER);
+}
+
+Dataset::Dataset(const int TYPE, const string DATA_FILE_NAME, const string TEST_DATA_FILE_NAME, const string DELIMETER) {
+	this->TYPE = TYPE;
+
+	readDataFile(DATA_FILE_NAME, DELIMETER);
+	readTestFile(TEST_DATA_FILE_NAME, DELIMETER);
+}
+
+Dataset::Dataset(Dataset* dataset) {
+	copy(dataset);
+}
+
+Dataset::~Dataset() {
+	clear();
+}
+
+void Dataset::initialize(const int TYPE, const int DIM_DATA_VECTOR, const int DIM_TARGET_VECTOR, const int NUM_CLASSES) {
+	this->TYPE = TYPE;
+	this->DIM_DATA_VECTOR = DIM_DATA_VECTOR;
+	this->DIM_TARGET_VECTOR = DIM_TARGET_VECTOR;
+	this->NUM_CLASSES = NUM_CLASSES;
+}
+
+void Dataset::initialize(const int TYPE, const string DATA_FILE_NAME, const string DELIMETER) {
+	this->TYPE = TYPE;
+
+	readDataFile(DATA_FILE_NAME, DELIMETER);
+}
+
+void Dataset::clear() {
+	const int NUM_INSTANCES = (const int)instances.size();
+	const int NUM_TEST_INSTANCES = (const int)testInstances.size();
+
+	// Clear the stored data.
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		delete instances[i];
+	}
+	instances.clear();
+
+	for (int i = 0; i < NUM_TEST_INSTANCES; i++) {
+		delete testInstances[i];
+	}
+	testInstances.clear();
+
+	// Clear the factors.
+	TYPE = -1;
+	DIM_DATA_VECTOR = 0;
+	DIM_TARGET_VECTOR = 0;
+	NUM_CLASSES = 0;
+	NUM_NOISED_INSTANCES = 0;
+}
+
+int Dataset::getType() {
+	return TYPE;
+}
+
+int Dataset::getNumInstances() {
+	return (int)instances.size();
+}
+
+int Dataset::getNumTestInstances() {
+	return (int)testInstances.size();
+}
+
+int Dataset::getNumNoisedInstances() {
+	return NUM_NOISED_INSTANCES;
+}
+
+int Dataset::getDimDataVector() {
+	return DIM_DATA_VECTOR;
+}
+
+int Dataset::getDimTargetVector() {
+	return DIM_TARGET_VECTOR;
+}
+
+int Dataset::getNumClasses() {
+	return NUM_CLASSES;
+}
+
+void Dataset::getDataVectors(float**& dataVectors) {
+	const int NUM_INSTANCES = (const int)getNumInstances();
+
+	dataVectors = new float*[NUM_INSTANCES];
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		dataVectors[i] = instances[i]->dataVector;
+	}
+}
+
+void Dataset::getTargetVectors(float**& targetVectors) {
+	const int NUM_INSTANCES = (const int)getNumInstances();
+
+	targetVectors = new float*[NUM_INSTANCES];
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		targetVectors[i] = instances[i]->targetVector;
+	}
+}
+
+int Dataset::getInstancesIdByClass(int*& instancesId, const int INDEX_CLASS) {
+	const int NUM_INSTANCES = (const int)instances.size();
+	vector<int> temp;
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		if (instances[i]->label == INDEX_CLASS) {
+			temp.push_back(instances[i]->id);
+		}
+	}
+
+	const int NUM_INSTANCES_BY_CLASS = (const int)temp.size();
+
+	instancesId = new int[NUM_INSTANCES_BY_CLASS];
+	for (int i = 0; i < NUM_INSTANCES_BY_CLASS; i++) {
+		instancesId[i] = temp[i];
+	}
+
+	return NUM_INSTANCES_BY_CLASS;
+}
+
+void Dataset::addInstance(Instance* newInstance) {
+	instances.push_back(newInstance);
+}
+
+void Dataset::addInstance(Instance* newInstance, const int POS) {
+	instances.insert(instances.begin() + POS, newInstance);
+}
+
+void Dataset::addInstanceCopy(Instance* newInstance) {
+	instances.push_back(new Instance(newInstance));
+}
+
+void Dataset::addInstanceCopy(Instance* newInstance, const int POS) {
+	instances.insert(instances.begin() + POS, new Instance(newInstance));
+}
+
+void Dataset::addTestInstance(Instance* newInstance) {
+	testInstances.push_back(new Instance(newInstance));
+}
+
+void Dataset::addTestInstance(Instance* newInstance, const int POS) {
+	testInstances.insert(testInstances.begin() + POS, new Instance(newInstance));
+}
+
+void Dataset::addTestInstanceCopy(Instance* newInstance) {
+	testInstances.push_back(new Instance(newInstance));
+}
+
+void Dataset::addTestInstanceCopy(Instance* newInstance, const int POS) {
+	testInstances.insert(testInstances.begin() + POS, new Instance(newInstance));
+}
+
+void Dataset::removeInstance(const int POS) {
+	delete instances[POS];
+	instances.erase(instances.begin() + POS);
+}
+
+void Dataset::removeInstance(const int POS_START, const int POS_END) {
+	for (int i = POS_START; i < POS_END; i++) {
+		delete instances[i];
+	}
+
+	instances.erase(instances.begin() + POS_START, instances.begin() + POS_END);
+}
+
+void Dataset::removeInstances(int* ARR, const int LEN) {
+	Arr::sort<int>(ARR, LEN, true);
+
+	for (int i = 0; i < LEN; i++) {
+		removeInstance(ARR[i]);
+	}
+}
+
+void Dataset::removeTestInstance(const int POS) {
+	testInstances.erase(testInstances.begin() + POS);
+}
+
+void Dataset::removeTestInstance(const int POS_START, const int POS_END) {
+	testInstances.erase(testInstances.begin() + POS_START, testInstances.begin() + POS_END);
+}
+
+void Dataset::removeTestInstances(int* ARR, const int LEN) {
+	Arr::sort<int>(ARR, LEN, true);
+
+	for (int i = 0; i < LEN; i++) {
+		removeTestInstance(ARR[i]);
+	}
+}
+
+void Dataset::normalize() {
+	const int NUM_INSTANCES = (const int)instances.size();
+	const int NUM_TEST_INSTANCES = (const int)testInstances.size();
+	float minVal;
+	float maxVal;
+
+	for (int j = 0; j < DIM_DATA_VECTOR; j++) {
+		minVal = instances[0]->dataVector[j];
+		maxVal = instances[0]->dataVector[j];
+
+		for (int i = 1; i < NUM_INSTANCES; i++) {
+			if (instances[i]->dataVector[j] < minVal) {
+				minVal = instances[i]->dataVector[j];
+			}
+
+			if (instances[i]->dataVector[j] > maxVal) {
+				maxVal = instances[i]->dataVector[j];
+			}
+		}
+
+		for (int i = 0; i < NUM_TEST_INSTANCES; i++) {
+			if (testInstances[i]->dataVector[j] < minVal) {
+				minVal = testInstances[i]->dataVector[j];
+			}
+
+			if (testInstances[i]->dataVector[j] > maxVal) {
+				maxVal = testInstances[i]->dataVector[j];
+			}
+		}
+
+		for (int i = 0; i < NUM_INSTANCES; i++) {
+			instances[i]->dataVector[j] = (instances[i]->dataVector[j] - minVal) / (maxVal - minVal);
+		}
+
+		for (int i = 0; i < NUM_TEST_INSTANCES; i++) {
+			testInstances[i]->dataVector[j] = (testInstances[i]->dataVector[j] - minVal) / (maxVal - minVal);
+		}
+	}
+}
+
+void Dataset::shuffle() {
+	const int NUM_INSTANCES = (const int)instances.size();
+	const int NUM_TEST_INSTANCES = (const int)testInstances.size();
+	int* randSeq = NULL;
+	float* temp = NULL;
+
+	randSeq = new int[NUM_INSTANCES];
+	Rnd::randSeq<int>(randSeq, 0, NUM_INSTANCES, NUM_INSTANCES, false);
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		temp = instances[i]->dataVector;
+		instances[i]->dataVector = instances[randSeq[i]]->dataVector;
+		instances[randSeq[i]]->dataVector = temp;
+
+		if (DIM_TARGET_VECTOR > 0) {
+			temp = instances[i]->targetVector;
+			instances[i]->targetVector = instances[randSeq[i]]->targetVector;
+			instances[randSeq[i]]->targetVector = temp;
+		}
+	}
+
+	Rnd::randSeq<int>(randSeq, 0, NUM_TEST_INSTANCES, NUM_TEST_INSTANCES, false);
+
+	for (int i = 0; i < NUM_TEST_INSTANCES; i++) {
+		temp = testInstances[i]->dataVector;
+		testInstances[i]->dataVector = testInstances[randSeq[i]]->dataVector;
+		testInstances[randSeq[i]]->dataVector = temp;
+
+		if (DIM_TARGET_VECTOR > 0) {
+			temp = testInstances[i]->targetVector;
+			testInstances[i]->targetVector = testInstances[randSeq[i]]->targetVector;
+			testInstances[randSeq[i]]->targetVector = temp;
+		}
+	}
+}
+
+void Dataset::copy(Dataset* dataset) {
+	clear();
+
+	const int NUM_INSTANCES = (const int)dataset->getNumInstances();
+	const int NUM_TEST_INSTANCES = (const int)dataset->getNumTestInstances();
+
+	TYPE = dataset->getType();
+	DIM_DATA_VECTOR = dataset->getDimDataVector();
+	DIM_TARGET_VECTOR = dataset->getDimTargetVector();
+	NUM_CLASSES = dataset->getNumClasses();
+	NUM_NOISED_INSTANCES = dataset->getNumNoisedInstances();
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		addInstance(new Instance(dataset->instances[i]));
+	}
+
+	for (int i = 0; i < NUM_TEST_INSTANCES; i++) {
+		addTestInstance(new Instance(dataset->testInstances[i]));
+	}
+
+	for (int i = 0; i < NUM_NOISED_INSTANCES; i++) {
+		noisedInstancesId.push_back(dataset->noisedInstancesId[i]);
+	}
+}
+
+void Dataset::addUniformNoise(const float RATIO_PERCENT, const float MIN, const float MAX) {
+	noisedInstancesId.clear();
+
+	const int NUM_INSTANCES = getNumInstances();
+
+	NUM_NOISED_INSTANCES = (const int)(NUM_INSTANCES * RATIO_PERCENT);
+
+	int* pos = new int[NUM_NOISED_INSTANCES];
+
+	Rnd::randSeq<int>(pos, 0, NUM_INSTANCES, NUM_NOISED_INSTANCES, false);
+	for (int i = 0; i < NUM_NOISED_INSTANCES; i++) {
+		for (int j = 0; j < DIM_DATA_VECTOR; j++) {
+			instances[pos[i]]->dataVector[j] += Rnd::rand<float>(MIN, MAX);
+		}
+
+		noisedInstancesId.push_back(instances[pos[i]]->id);
+	}
+
+	Arr::sort<int>(&noisedInstancesId);
+
+	delete[] pos;
+}
+
+void Dataset::addUniformNoise(const float RATIO_PERCENT) {
+	noisedInstancesId.clear();
+
+	const int NUM_INSTANCES = getNumInstances();
+	float** dataVectors = NULL;
+	float* min = new float[DIM_DATA_VECTOR];
+	float* max = new float[DIM_DATA_VECTOR];
+
+	NUM_NOISED_INSTANCES = (const int)(NUM_INSTANCES * RATIO_PERCENT);
+
+	int* pos = new int[NUM_NOISED_INSTANCES];
+
+	Rnd::randSeq<int>(pos, 0, NUM_INSTANCES, NUM_NOISED_INSTANCES, false);
+	getDataVectors(dataVectors);
+
+	for (int i = 0; i < DIM_DATA_VECTOR; i++) {
+		min[i] = Arr::minCol<float>(dataVectors, NUM_INSTANCES, i);
+		max[i] = Arr::maxCol<float>(dataVectors, NUM_INSTANCES, i);
+	}
+
+	for (int i = 0; i < NUM_NOISED_INSTANCES; i++) {
+		for (int j = 0; j < DIM_DATA_VECTOR; j++) {
+			dataVectors[pos[i]][j] += Rnd::rand<float>(min[j], max[j]);
+		}
+
+		noisedInstancesId.push_back(instances[pos[i]]->id);
+	}
+
+	Arr::sort<int>(&noisedInstancesId);
+
+	delete[] dataVectors;
+	delete[] min;
+	delete[] max;
+	delete[] pos;
+}
+
+void Dataset::addGaussianNoise(const float RATIO_PERCENT, const float MEAN, const float STD) {
+	noisedInstancesId.clear();
+
+	const int NUM_INSTANCES = getNumInstances();
+	unsigned int seed = (unsigned int)chrono::system_clock::now().time_since_epoch().count();
+	default_random_engine generator(seed);
+	normal_distribution<float> gaussian(MEAN, STD);
+
+	NUM_NOISED_INSTANCES = (const int)(NUM_INSTANCES * RATIO_PERCENT);
+	
+	int* pos = new int[NUM_NOISED_INSTANCES];
+
+	Rnd::randSeq<int>(pos, 0, NUM_INSTANCES, NUM_NOISED_INSTANCES, false);
+
+	for (int i = 0; i < NUM_NOISED_INSTANCES; i++) {
+		for (int j = 0; j < DIM_DATA_VECTOR; j++) {
+			instances[pos[i]]->dataVector[j] += gaussian(generator);
+		}
+
+		noisedInstancesId.push_back(instances[pos[i]]->id);
+	}
+
+	Arr::sort<int>(&noisedInstancesId);
+
+	delete[] pos;
+}
+
+int Dataset::idToIndex(const int ID) {
+	const int NUM_INSTANCES = (const int)instances.size();
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		if (instances[i]->id == ID) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+int Dataset::indexToId(const int INDEX) {
+	return instances[INDEX]->id;
+}
+
+void Dataset::splitTestDataset(const float RATIO) {
+	const int NUM_TEST_INSTANCES = getNumInstances() * RATIO;
+	Dataset* datasets = new Dataset(getType(), getDimDataVector(), getDimTargetVector(), getNumClasses());
+	int* randSeq = new int[NUM_TEST_INSTANCES];
+
+	Rnd::randSeq<int>(randSeq, 0, getNumInstances(), NUM_TEST_INSTANCES, false);
+	Arr::sort<int>(randSeq, NUM_TEST_INSTANCES, true);
+
+	for (int i = 0; i < NUM_TEST_INSTANCES; i++) {
+		testInstances.push_back(new Instance(instances[randSeq[i]]));
+		instances.erase(instances.begin() + randSeq[i]);
+	}
+
+	shuffle();
+}
+
+void Dataset::print() {
+	const int NUM_INSTANCES = (const int)instances.size();
+	const int NUM_TEST_INSTANCES = (const int)testInstances.size();
+
+	cout << "Training dataset: " << endl;
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		cout << Arr::toString(instances[i]->dataVector, DIM_DATA_VECTOR);
+		
+		if (TYPE == LABELLED) {
+			cout << " " << Arr::toString(instances[i]->targetVector, DIM_TARGET_VECTOR) << endl;
+		}
+		else if (TYPE == UNLABELLED) {
+			cout << endl;
+		}
+	}
+
+	if (NUM_TEST_INSTANCES == 0) {
+		cout << endl << "Test dataset: None" << endl;
+	}
+	else {
+		cout << endl << "Test dataset: " << endl;
+		for (int i = 0; i < NUM_TEST_INSTANCES; i++) {
+			cout << Arr::toString(testInstances[i]->dataVector, DIM_DATA_VECTOR);
+
+			if (TYPE == LABELLED) {
+				cout << " " << Arr::toString(testInstances[i]->targetVector, DIM_TARGET_VECTOR) << endl;
+			}
+			else if (TYPE == UNLABELLED) {
+				cout << endl;
+			}
+		}
+	}
+}
+
+void Dataset::save(const string FILE_NAME) {
+	const int NUM_INSTANCES = getNumInstances();
+	ofstream dataFile(FILE_NAME);
+
+	/*
+	dataFile << NUM_INSTANCES << endl;
+	dataFile << DIM_DATA_VECTOR << endl;
+	dataFile << DIM_TARGET_VECTOR << endl;
+	dataFile << NUM_CLASSES << endl;
+	*/
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		dataFile << vectorToString(instances[i]->dataVector, DIM_DATA_VECTOR);
+
+		if (DIM_TARGET_VECTOR > 0) {
+			dataFile << "," + vectorToString(instances[i]->targetVector, DIM_TARGET_VECTOR);
+		}
+
+		if (i < NUM_INSTANCES - 1) {
+			dataFile << endl;
+		}
+	}
+
+	dataFile.close();
+}
+
+
+
+class Str {
+public:
+	static int split(string*& dest, const string str, const string delimeter);
+	static int splitAsInt(int*& dest, const string str, const string delimeter);
+	static int splitAsFloat(float*& dest, const string str, const string delimeter);
+	static int toInt(const string str);
+	static float toFloat(const string str);
+};
+
+int Str::split(string*& dest, const string str, const string delimeter) {
+	const int LENGTH = (const int)str.length();
+	const int LENGTH_DELIM = (const int)delimeter.length();
+
+	int bound = 0;
+	vector<string> result;
+
+	for (int i = 0; i < LENGTH; i++) {
+		if (str.compare(i, LENGTH_DELIM, delimeter) == 0 && i > 0) {
+			result.push_back(str.substr(bound, i - bound));
+			bound = i + LENGTH_DELIM;
+		}
+	}
+
+	if (bound < LENGTH) {
+		result.push_back(str.substr(bound, LENGTH - bound));
+	}
+
+	const int NUM_WORDS = (const int)result.size();
+	dest = new string[NUM_WORDS];
+
+	for (int i = 0; i < NUM_WORDS; i++) {
+		dest[i] = result[i];
+	}
+
+	return NUM_WORDS;
+}
+
+int Str::splitAsInt(int*& dest, const string str, const string delimeter) {
+	const int LENGTH = (const int)str.length();
+	const int LENGTH_DELIM = (const int)delimeter.length();
+
+	int bound = 0;
+	vector<int> result;
+
+	for (int i = 0; i < LENGTH; i++) {
+		if (str.compare(i, LENGTH_DELIM, delimeter) == 0 && i > 0) {
+			result.push_back(Str::toInt(str.substr(bound, i - bound)));
+			bound = i + LENGTH_DELIM;
+		}
+	}
+
+	if (bound < LENGTH) {
+		result.push_back(Str::toInt(str.substr(bound, LENGTH - bound)));
+	}
+
+	const int NUM_DATA = (const int)result.size();
+	dest = new int[NUM_DATA];
+
+	for (int i = 0; i < NUM_DATA; i++) {
+		dest[i] = result[i];
+	}
+
+	return NUM_DATA;
+}
+
+int Str::splitAsFloat(float*& dest, const string str, const string delimeter) {
+	const int LENGTH = (const int)str.length();
+	const int LENGTH_DELIM = (const int)delimeter.length();
+
+	int bound = 0;
+	vector<float> result;
+
+	for (int i = 0; i < LENGTH; i++) {
+		if (str.compare(i, LENGTH_DELIM, delimeter) == 0 && i > 0) {
+			result.push_back(Str::toFloat(str.substr(bound, i - bound)));
+			bound = i + LENGTH_DELIM;
+		}
+	}
+
+	if (bound < LENGTH) {
+		result.push_back(Str::toFloat(str.substr(bound, LENGTH - bound)));
+	}
+
+	const int NUM_DATA = (const int)result.size();
+	dest = new float[NUM_DATA];
+
+	for (int i = 0; i < NUM_DATA; i++) {
+		dest[i] = result[i];
+	}
+
+	return NUM_DATA;
+}
+
+int Str::toInt(const string str) {
+	return atoi(str.c_str());
+}
+
+float Str::toFloat(const string str) {
+	return (float)atof(str.c_str());
+}
+
+
+
+using namespace std;
+
+class Rnd {
+public:
+	template <typename T> static T rand(const T MIN, const T MAX);
+	template <typename T> static void randSeq(T*& seq, const T MIN, const T MAX, const int LEN_SEQ, const bool DUPLICABLE);
+	template <typename T> static T normal(const T MEAN, const T STD);
+	static int rouletteSelection(float* PROBS, const int NUM_INSTANCES, const float SUM_PROBS);
+};
+
+template <typename T> T Rnd::rand(const T MIN, const T MAX) {
+	random_device rd;
+	mt19937 eng(rd());
+
+	if (typeid(T) == typeid(int)) {
+		uniform_int_distribution<> dist(MIN, MAX - 1);
+
+		return (T)dist(eng);
+	}
+	else {
+		uniform_real_distribution<> dist(MIN, MAX);
+
+		return (T)dist(eng);
+	}
+}
+
+template <typename T> void Rnd::randSeq(T*& seq, const T MIN, const T MAX, const int LEN_SEQ, const bool DUPLICABLE) {
+	random_device rd;
+	mt19937 eng(rd());
+
+	if (DUPLICABLE) {
+		if (typeid(T) == typeid(int)) {
+			uniform_int_distribution<> dist(MIN, MAX - 1);
+
+			for (int i = 0; i < LEN_SEQ; i++) {
+				seq[i] = dist(eng);
+			}
+		}
+		else {
+			uniform_real_distribution<> dist(MIN, MAX);
+
+			for (int i = 0; i < LEN_SEQ; i++) {
+				seq[i] = (float)dist(eng);
+			}
+		}
+	}
+	else {
+		if (typeid(T) == typeid(int)) {
+			vector<int> numbers;
+			int selectedIndex = 0;
+
+			for (int i = MIN; i < MAX; i++) {
+				numbers.push_back(i);
+			}
+
+			for (int i = 0; i < LEN_SEQ; i++) {
+				uniform_int_distribution<> dist(0, (const int)numbers.size() - 1);
+
+				selectedIndex = dist(eng);
+				seq[i] = numbers[selectedIndex];
+				numbers.erase(numbers.begin() + selectedIndex);
+			}
+		}
+		else {
+			uniform_real_distribution<> dist(MIN, MAX);
+			float temp;
+
+			for (int i = 0; i < LEN_SEQ; i++) {
+				temp = (float)dist(eng);
+
+				for (int j = 0; j < i; j++) {
+					if (temp == seq[j]) {
+						temp = (float)dist(eng);
+						j = 0;
+					}
+				}
+
+				seq[i] = (float)dist(eng);
+			}
+		}
+	}
+}
+
+template <typename T> T Rnd::normal(const T MEAN, const T STD) {
+	random_device rd;
+	mt19937 eng(rd());
+	normal_distribution<T> dist(MEAN, STD);
+
+	return (T)dist(rd);
+}
+
+int Rnd::rouletteSelection(float* PROBS, const int NUM_INSTANCES, const float SUM_PROBS) {
+	const float position = Rnd::rand<float>(0, 1) * SUM_PROBS;
+	float sum = 0;
+
+	for (int i = 0; i < NUM_INSTANCES; i++) {
+		sum += PROBS[i];
+
+		if (position < sum) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+
+
+class Mem {
+public:
+	template <typename T> static void alloc2D(T**& dest, const int NUM_ROWS, const int NUM_COLS);
+	template <typename T> static T** alloc2D(const int NUM_ROWS, const int NUM_COLS);
+	template <typename T> static void delete2D(T** arr, const int NUM_ROWS);
+};
+
+template <typename T>
+static void Mem::alloc2D(T**& dest, const int NUM_ROWS, const int NUM_COLS) {
+	dest = new T*[NUM_ROWS];
+
+	for (int i = 0; i < NUM_ROWS; i++) {
+		dest[i] = new T[NUM_COLS];
+	}
+}
+
+template <typename T>
+static T** Mem::alloc2D(const int NUM_ROWS, const int NUM_COLS) {
+	T** dest = new T*[NUM_ROWS];
+
+	for (int i = 0; i < NUM_ROWS; i++) {
+		dest[i] = new T[NUM_COLS];
+	}
+
+	return dest;
+}
+
+template <typename T>
+static void Mem::delete2D(T** arr, const int NUM_ROWS) {
+	if (arr == NULL) {
+		return;
+	}
+
+	for (int i = 0; i < NUM_ROWS; i++) {
+		delete[] arr[i];
+	}
+
+	delete[] arr;
+}
+
+
+template <typename T, typename S>
+class Tuple {
+public:
+	T first;
+	S second;
+
+	Tuple(const T first, const S second);
+	void print();
+};
+
+template <typename T, typename S>
+Tuple<T, S>::Tuple(const T first, const S second) {
+	this->first = first;
+	this->second = second;
+}
+
+template <typename T, typename S>
+void Tuple<T, S>::print() {
+	cout << "(" << first << ", " << second << ")" << endl;
+}
+
+
+
+
+
+
+class LOFConfiguration {
+public:
+	int TYPE_DIST = 0;
+	int DIM_DATA_POINT = 0;
+	int K = 0;
+	float THRESHOLD = 0;
+	int MAX_NUM_INSTANCES = 0;
+
+	LOFConfiguration(const int DIM_DATA_POINT, const int K, const float THRESHOLD, const int MAX_NUM_INSTANCES);
+};
+
+LOFConfiguration::LOFConfiguration(const int DIM_DATA_POINT, const int K, const float THRESHOLD, const int MAX_NUM_INSTANCES) {
+	this->TYPE_DIST = TYPE_DIST;
+	this->DIM_DATA_POINT = DIM_DATA_POINT;
+	this->K = K;
+	this->THRESHOLD = THRESHOLD;
+	this->MAX_NUM_INSTANCES = MAX_NUM_INSTANCES;
+}
+
+#define INITIAL_BUFFER_SIZE_FACTOR		4
+
+class IncrementalLOF : public LOF {
+protected:
+	int INITIAL_BUFFER_SIZE = 0;
+	bool ENABLE_SKIP = false;
+
+	Dataset dataset;
+	bool isInitialPhase = true;
+	float* lastOutlier = NULL;
+
+	void reset(Instance* instance);
+	void computeAddedDistMatrix();
+
+public:
+	IncrementalLOF(LOFConfiguration& conf);
+	void insertion(Instance* instance, const bool DSiLOF_A);
+};
+
+void IncrementalLOF::reset(Instance* instance) {
+	const int NUM_PREV_DATA_VECTORS = NUM_DATA_POINTS;
+	float** tempDistMatrix = NULL;
+	int** tempknnMatrix = NULL;
+	float** tempReachDist = NULL;
+	float* tempKDist = NULL;
+	float* tempLRD = NULL;
+	float* tempLOF = NULL;
+
+	NUM_DATA_POINTS = dataset.getNumInstances();
+
+	Mem::alloc2D<float>(tempDistMatrix, NUM_DATA_POINTS + 1, NUM_DATA_POINTS + 1);
+	Mem::alloc2D<int>(tempknnMatrix, NUM_DATA_POINTS + 1, K);
+	Mem::alloc2D<float>(tempReachDist, NUM_DATA_POINTS + 1, NUM_DATA_POINTS + 1);
+	tempKDist = new float[NUM_DATA_POINTS + 1];
+	tempLRD = new float[NUM_DATA_POINTS + 1];
+	tempLOF = new float[NUM_DATA_POINTS + 1];
+
+	Arr::copy<float>(tempDistMatrix, distMatrix, NUM_DATA_POINTS, NUM_DATA_POINTS);
+	Arr::copy<float>(tempReachDist, reachDist, NUM_DATA_POINTS, NUM_DATA_POINTS);
+	Arr::copy<float>(tempKDist, kDist, NUM_DATA_POINTS);
+	Arr::set<int>(tempknnMatrix, NUM_DATA_POINTS + 1, K, -1);
+	Arr::copy<int>(tempknnMatrix, knnMatrix, NUM_DATA_POINTS, K);
+
+	Mem::delete2D<float>(distMatrix, NUM_PREV_DATA_VECTORS);
+	Mem::delete2D<int>(knnMatrix, NUM_PREV_DATA_VECTORS);
+	Mem::delete2D<float>(reachDist, NUM_PREV_DATA_VECTORS);
+	delete[] kDist;
+	delete[] lrd;
+	delete[] lof;
+
+	distMatrix = tempDistMatrix;
+	knnMatrix = tempknnMatrix;
+	reachDist = tempReachDist;
+	kDist = tempKDist;
+	lrd = tempLRD;
+	lof = tempLOF;
+
+	dataset.addInstanceCopy(instance);
+	NUM_DATA_POINTS = dataset.getNumInstances();
+}
+
+void IncrementalLOF::computeAddedDistMatrix() {
+	float** dataVectors = NULL;
+
+	dataset.getDataVectors(dataVectors);
+	distMatrix[NUM_DATA_POINTS - 1][NUM_DATA_POINTS - 1] = 0;
+
+	for (int i = 0; i < NUM_DATA_POINTS - 1; i++) {
+		distMatrix[NUM_DATA_POINTS - 1][i] = Math::eucDist<float>(dataVectors[NUM_DATA_POINTS - 1], dataVectors[i], DIM_DATA_POINT);
+		distMatrix[i][NUM_DATA_POINTS - 1] = distMatrix[NUM_DATA_POINTS - 1][i];
+	}
+
+	delete[] dataVectors;
+}
+
+IncrementalLOF::IncrementalLOF(LOFConfiguration& conf) : LOF(conf) {
+	this->THRESHOLD = conf.THRESHOLD;
+	this->INITIAL_BUFFER_SIZE = K * INITIAL_BUFFER_SIZE_FACTOR;
+
+	dataset.initialize(Dataset::UNLABELLED, DIM_DATA_POINT, 0, 0);
+}
+
+void IncrementalLOF::insertion(Instance* instance, const bool DSiLOF_A) {
+	int neighborIndex = -1;
+	vector<int> updateQueue;
+
+	if (isInitialPhase && NUM_DATA_POINTS < INITIAL_BUFFER_SIZE) {
+		dataset.addInstanceCopy(instance);
+		NUM_DATA_POINTS++;
+
+		if (NUM_DATA_POINTS == INITIAL_BUFFER_SIZE) {
+			run(dataset, true);
+			isInitialPhase = false;
+			if (outliersId.size() > 0) {
+				lastOutlier = dataset.instances[outliersId[outliersId.size() - 1]]->dataVector;
+			}
+		}
+
+		return;
+	}
+
+	if (DSiLOF_A) {
+		if (ENABLE_SKIP) {
+			const float outlierDist = Math::eucDist<float>(instance->dataVector, lastOutlier, DIM_DATA_POINT);
+			float avgDistFirstNN = 0;
+
+			for (int i = 0; i < NUM_DATA_POINTS; i++) {
+				avgDistFirstNN += distMatrix[i][knnMatrix[i][0]];
+			}
+			avgDistFirstNN /= (float)NUM_DATA_POINTS;
+
+			if (outlierDist < avgDistFirstNN) {
+				outliersId.push_back(instance->id);
+				return;
+			}
+			else {
+				ENABLE_SKIP = false;
+			}
+		}
+	}
+
+	reset(instance);
+	computeAddedDistMatrix();
+	createKNNMatrix(NUM_DATA_POINTS - 1);
+
+	kDist[NUM_DATA_POINTS - 1] = computeKDist(NUM_DATA_POINTS - 1);
+	for (int i = 0; i < K; i++) {
+		neighborIndex = knnMatrix[NUM_DATA_POINTS - 1][i];
+		reachDist[NUM_DATA_POINTS - 1][neighborIndex] = computeReachDist(NUM_DATA_POINTS - 1, neighborIndex);
+	}
+
+	for (int i = 0; i < NUM_DATA_POINTS - 1; i++) {
+		for (int j = 0; j < K; j++) {
+			if (knnMatrix[i][j] == NUM_DATA_POINTS - 1) {
+				updateQueue.push_back(i);
+				break;
+			}
+		}
+	}
+
+	const int SIZE_UPDATE_QUEUE = (const int)updateQueue.size();
+
+	for (int i = 0; i < SIZE_UPDATE_QUEUE; i++) {
+		kDist[updateQueue[i]] = computeKDist(updateQueue[i]);
+		reachDist[updateQueue[i]][NUM_DATA_POINTS - 1] = computeReachDist(updateQueue[i], NUM_DATA_POINTS - 1);
+	}
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		for (int j = 0; j < K; j++) {
+			for (int k = 0; k < SIZE_UPDATE_QUEUE; k++) {
+				if (knnMatrix[i][j] == updateQueue[k]) {
+					reachDist[i][j] = computeReachDist(i, j);
+					break;
+				}
+			}
+		}
+	}
+
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		lrd[i] = computeLRD(i);
+	}
+
+	for (int i = 0; i < NUM_DATA_POINTS; i++) {
+		lof[i] = computeLOF(i);
+	}
+
+	if (lof[NUM_DATA_POINTS - 1] > THRESHOLD) {
+		outliersId.push_back(instance->id);
+
+		if (DSiLOF_A) {
+			lastOutlier = dataset.instances[NUM_DATA_POINTS - 1]->dataVector;
+			ENABLE_SKIP = true;
+		}
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+class Arr {
+private:
+	template <typename T> static void quickSort(T*& arr, const int LEN, const int left, const int right, const bool DESC);
+
+public:
+	template <typename T> static string toString(T* ARR, const int LEN);
+	template <typename T> static string toString(T** ARR, const int NUM_ROWS, const int NUM_COLS);
+	template <typename T> static void copy(T*& dest, const T* SRC, const int LEN);
+	template <typename T> static void copy(T**& dest, T** SRC, const int NUM_ROWS, const int NUM_COLS);
+	template <typename T> static void set(T*& arr, const int LEN, const T VAL);
+	template <typename T> static void set(T**& arr, const int NUM_ROWS, const int NUM_COLS, const T VAL);
+	template <typename T> static T min(T* ARR, const int LEN);
+	template <typename T> static T max(T* ARR, const int LEN);
+	template <typename T> static int minIndex(T* ARR, const int LEN);
+	template <typename T> static int maxIndex(T* ARR, const int LEN);
+	template <typename T> static T minCol(T** ARR, const int NUM_ROWS, const int INDEX_COL);
+	template <typename T> static T maxCol(T** ARR, const int NUM_ROWS, const int INDEX_COL);
+	template <typename T> static void sort(T*& arr, const int LEN, const bool DESC);
+	template <typename T> static void sort(vector<T>* vec);
+	template <typename T> static void initRandomly(T*& arr, const int LEN, const float MIN, const float MAX);
+	template <typename T> static void initRandomly(T**& arr, const int NUM_ROWS, const int NUM_COLS, const float MIN, const float MAX);
+	template <typename T> static T sum(T* ARR, const int LEN);
+	template <typename T> static float average(T* ARR, const int LEN);
+};
+
+template <typename T>
+void Arr::quickSort(T*& arr, const int LEN, const int left, const int right, const bool DESC) {
+	int i = left;
+	int j = right;
+	int temp;
+	int pivot = arr[(left + right) / 2];
+
+	if (DESC) {
+		while (i <= j) {
+			while (arr[i] > pivot) {
+				i++;
+			}
+
+			while (arr[j] < pivot) {
+				j--;
+			}
+
+			if (i <= j) {
+				temp = arr[i];
+				arr[i] = arr[j];
+				arr[j] = temp;
+				i++;
+				j--;
+			}
+		}
+	}
+	else {
+		while (i <= j) {
+			while (arr[i] < pivot) {
+				i++;
+			}
+
+			while (arr[j] > pivot) {
+				j--;
+			}
+
+			if (i <= j) {
+				temp = arr[i];
+				arr[i] = arr[j];
+				arr[j] = temp;
+				i++;
+				j--;
+			}
+		}
+	}
+
+	if (left < j) {
+		quickSort(arr, LEN, left, j, DESC);
+	}
+
+	if (i < right) {
+		quickSort(arr, LEN, i, right, DESC);
+	}
+}
+
+template <typename T>
+string Arr::toString(T* ARR, const int LEN) {
+	string result = "[ ";
+
+	for (int i = 0; i < LEN; i++) {
+		result += to_string(ARR[i]) + " ";
+	}
+	result += "]";
+
+	return result;
+}
+
+template <typename T>
+string Arr::toString(T** ARR, const int NUM_ROWS, const int NUM_COLS) {
+	string result = "[";
+
+	for (int i = 0; i < NUM_ROWS; i++) {
+		if (i < NUM_ROWS - 1) {
+			result += toString(ARR[i], NUM_COLS) + "\n";
+		}
+		else {
+			result += toString(ARR[i], NUM_COLS);
+		}
+	}
+	result += "]";
+
+	return result;
+}
+
+template <typename T>
+void Arr::copy(T*& dest, const T* SRC, const int LEN) {
+	memcpy(dest, SRC, sizeof(T) * LEN);
+}
+
+template <typename T>
+void Arr::copy(T**& dest, T** SRC, const int NUM_ROWS, const int NUM_COLS) {
+	for (int i = 0; i < NUM_ROWS; i++) {
+		memcpy(dest[i], SRC[i], sizeof(T) * NUM_COLS);
+	}
+}
+
+template <typename T>
+void Arr::set(T*& arr, const int LEN, const T VAL) {
+	for (int i = 0; i < LEN; i++) {
+		arr[i] = VAL;
+	}
+}
+
+template <typename T>
+void Arr::set(T**& arr, const int NUM_ROWS, const int NUM_COLS, const T VAL) {
+	for (int i = 0; i < NUM_ROWS; i++) {
+		for (int j = 0; j < NUM_COLS; j++) {
+			arr[i][j] = VAL;
+		}
+	}
+}
+
+template <typename T>
+T Arr::min(T* ARR, const int LEN) {
+	T minVal = ARR[0];
+
+	for (int i = 1; i < LEN; i++) {
+		if (ARR[i] < minVal) {
+			minVal = ARR[i];
+		}
+	}
+
+	return minVal;
+}
+
+template <typename T>
+T Arr::max(T* ARR, const int LEN) {
+	T maxVal = ARR[0];
+
+	for (int i = 1; i < LEN; i++) {
+		if (ARR[i] > maxVal) {
+			maxVal = ARR[i];
+		}
+	}
+
+	return maxVal;
+}
+
+template <typename T>
+int Arr::minIndex(T* ARR, const int LEN) {
+	int minIndex = 0;
+	T minVal = ARR[0];
+
+	for (int i = 1; i < LEN; i++) {
+		if (ARR[i] < minVal) {
+			minIndex = i;
+			minVal = ARR[i];
+		}
+	}
+
+	return minIndex;
+}
+
+template <typename T>
+int Arr::maxIndex(T* ARR, const int LEN) {
+	int maxIndex = 0;
+	T maxVal = ARR[0];
+
+	for (int i = 1; i < LEN; i++) {
+		if (ARR[i] > maxVal) {
+			maxIndex = i;
+			maxVal = ARR[i];
+		}
+	}
+
+	return maxIndex;
+}
+
+template <typename T>
+T Arr::minCol(T** ARR, const int NUM_ROWS, const int INDEX_COL) {
+	T minVal = ARR[0][INDEX_COL];
+
+	for (int i = 1; i < NUM_ROWS; i++) {
+		if (ARR[i][INDEX_COL] < minVal) {
+			minVal = ARR[i][INDEX_COL];
+		}
+	}
+
+	return minVal;
+}
+
+template <typename T>
+T Arr::maxCol(T** ARR, const int NUM_ROWS, const int INDEX_COL) {
+	T maxVal = ARR[0][INDEX_COL];
+
+	for (int i = 1; i < NUM_ROWS; i++) {
+		if (ARR[i][INDEX_COL] > maxVal) {
+			maxVal = ARR[i][INDEX_COL];
+		}
+	}
+
+	return maxVal;
+}
+
+template <typename T>
+void Arr::sort(T*& arr, const int LEN, const bool DESC) {
+	quickSort<T>(arr, LEN, 0, LEN - 1, DESC);
+}
+
+template <typename T>
+void Arr::sort(vector<T>* vec) {
+	std::sort(vec->begin(), vec->end());
+}
+
+template <typename T>
+void Arr::initRandomly(T*& arr, const int LEN, const float MIN, const float MAX) {
+	for (int i = 0; i < LEN; i++) {
+		arr[i] = (T)Rnd::rand<T>(MIN, MAX);
+	}
+}
+
+template <typename T>
+void Arr::initRandomly(T**& arr, const int NUM_ROWS, const int NUM_COLS, const float MIN, const float MAX) {
+	for (int i = 0; i < NUM_ROWS; i++) {
+		for (int j = 0; j < NUM_COLS; j++) {
+			arr[i][j] = (T)Rnd::rand<T>(MIN, MAX);
+		}
+	}
+}
+
+template <typename T>
+T Arr::sum(T* ARR, const int LEN) {
+	T sum = 0;
+
+	for (int i = 0; i < LEN; i++) {
+		sum += ARR[i];
+	}
+
+	return sum;
+}
+
+template <typename T>
+float Arr::average(T* ARR, const int LEN) {
+	return sum<T>(ARR, LEN) / (float)LEN;
+}
+
+
+
+
+class DILOF: public IncrementalLOF {
+protected:
+	int W = 0;
+	int H_W = 0;
+	int Q_W = 0;
+
+	void summarize();
+	void selectOptimalInstances();
+	int getKthNNIndex(const int INDEX, int* y);
+	float getKthNNDist(const int INDEX, float* tempY);
+	float getApproximatedKthNNDist(const int INDEX, const float SUM_NN_LOF, const float SUM_LOF);
+	void project(int*& y, float* tempY);
+
+public:
+	DILOF(LOFConfiguration& conf);
+	void insertion(Instance* instance);
+};
+
+void DILOF::summarize() {
+	selectOptimalInstances();
+	run(dataset, false, false);
+}
+
+void DILOF::selectOptimalInstances() {
+	const int MAX_ITERATION = 20;
+	float LEARNING_RATE = 0.3f;
+
+	int* y = new int[H_W];
+	float* tempY = new float[H_W];
+	float* approxRho = new float[H_W];
+	float* gradients = new float[H_W];
+	float* sumNNLOF = new float[H_W];
+	float* expSigLOF = new float[H_W];
+	int* kthNNs = new int[H_W];
+	float sumY = 0;
+	float sumLOF = 0;
+	float sumDist = 0;
+	float avgSumNNLOF = 0;
+	int kthNN = -1;
+
+	Arr::set<float>(tempY, H_W, 0.5);
+	Arr::set<float>(sumNNLOF, H_W, 0);
+
+	for (int i = 0; i < H_W; i++) {
+		expSigLOF[i] = exp(Math::sigmoid(lof[i]));
+	}
+
+	for (int i = 0; i < H_W; i++) {
+		for (int k = 0; k < K; k++) {
+			if (knnMatrix[i][k] < H_W) {
+				sumNNLOF[i] += expSigLOF[knnMatrix[i][k]];
+			}
+		}
+		avgSumNNLOF += sumNNLOF[i];
+
+		sumLOF += expSigLOF[i];
+	}
+	avgSumNNLOF /= (float)H_W;
+
+	for (int i = 0; i < H_W; i++) {
+		approxRho[i] = getApproximatedKthNNDist(i, sumNNLOF[i], sumLOF);
+		kthNN = knnMatrix[i][K - 1];
+		kthNNs[i] = kthNN;
+
+		if (sumNNLOF[i] > avgSumNNLOF) {
+			for (int j = 0; j < H_W; j++) {
+				if (distMatrix[i][j] > distMatrix[i][kthNN] && distMatrix[i][j] < 2 * Math::sigmoid(lof[i]) * distMatrix[i][kthNN]) {
+					kthNNs[i] = j;
+					break;
+				}
+			}
+		}
+	}
+
+	for (int c = 0; c < MAX_ITERATION; c++) {
+		LEARNING_RATE *= 0.95;
+		sumY = 0;
+
+		for (int i = 0; i < H_W; i++) {
+			sumY += tempY[i];
+		}
+
+		for (int i = 0; i < H_W; i++) {
+			sumDist = 0;
+
+			for (int n = 0; n < H_W; n++) {
+				if (kthNNs[n] == i) {
+					sumDist += tempY[n] * (distMatrix[n][i] / distMatrix[n][knnMatrix[n][K - 1]]);
+				}
+			}
+
+			gradients[i] = (sumDist + approxRho[i]) - exp(lof[i]) + 0.001 * (sumY - Q_W);
+
+			if (tempY[i] > 1) {
+				gradients[i] += 2 * (tempY[i] - 1);
+			}
+			else if (tempY[i] < 0) {
+				gradients[i] += 2 * tempY[i];
+			}
+		}
+
+		for (int i = 0; i < H_W; i++) {
+			tempY[i] = tempY[i] - LEARNING_RATE * gradients[i];
+		}
+	}
+
+	project(y, tempY);
+
+	for (int i = H_W - 1; i > -1; i--) {
+		if (y[i] == 0) {
+			dataset.removeInstance(i);
+		}
+	}
+
+	delete[] y;
+	delete[] tempY;
+	delete[] approxRho;
+	delete[] gradients;
+	delete[] sumNNLOF;
+	delete[] expSigLOF;
+	delete[] kthNNs;
+}
+
+int DILOF::getKthNNIndex(const int INDEX, int* y) {
+	int* nn = new int[K];
+	int kthNNIndex = -1;
+
+	Arr::set<int>(nn, K, -1);
+
+	for (int i = 0; i < H_W; i++) {
+		if (i == INDEX) {
+			continue;
+		}
+
+		for (int j = 0; j < K; j++) {
+			if (nn[j] == -1) {
+				nn[j] = j;
+				break;
+			}
+			else {
+				if (y[i] * distMatrix[INDEX][i] < y[i] * distMatrix[INDEX][knnMatrix[INDEX][j]]) {
+					for (int k = j - 2; k >= j; k--) {
+						nn[k + 1] = nn[k];
+					}
+					nn[j] = i;
+					break;
+				}
+			}
+		}
+	}
+	kthNNIndex = nn[K - 1];
+
+	delete[] nn;
+
+	return kthNNIndex;
+}
+
+float DILOF::getKthNNDist(const int INDEX, float* tempY) {
+	int* nn = new int[K];
+	int* y = new int[H_W];
+
+	project(y, tempY);
+	Arr::set<int>(nn, K, -1);
+
+	for (int i = 0; i < H_W; i++) {
+		if (i == INDEX) {
+			continue;
+		}
+
+		for (int j = 0; j < K; j++) {
+			if (nn[j] == -1) {
+				nn[j] = j;
+				break;
+			}
+			else {
+				if (y[i] * distMatrix[INDEX][i] < y[i] * distMatrix[INDEX][knnMatrix[INDEX][j]]) {
+					for (int k = j - 2; k >= j; k--) {
+						nn[k + 1] = nn[k];
+					}
+					nn[j] = i;
+					break;
+				}
+			}
+		}
+	}
+	
+	float dist = distMatrix[INDEX][nn[K - 1]];
+
+	delete[] nn;
+	delete[] y;
+
+	return dist;
+}
+
+float DILOF::getApproximatedKthNNDist(const int INDEX, const float SUM_NN_LOF, const float SUM_LOF) {
+	float kthNNDistance = distMatrix[INDEX][knnMatrix[INDEX][K - 1]];
+	float maxDistance = distMatrix[INDEX][0];
+
+	for (int i = 1; i < H_W; i++) {
+		if (distMatrix[INDEX][i] > maxDistance) {
+			maxDistance = distMatrix[INDEX][i];
+		}
+	}
+
+	return (kthNNDistance + (SUM_NN_LOF / SUM_LOF) * (maxDistance - kthNNDistance)) / distMatrix[INDEX][knnMatrix[INDEX][K - 1]];
+}
+
+void DILOF::project(int*& y, float* tempY) {
+	pair<float, int>* pairs = new pair<float, int>[H_W];
+
+	for (int i = 0; i < H_W; i++) {
+		pairs[i] = make_pair(tempY[i], i);
+	}
+
+	sort(pairs, pairs + H_W, [](pair<float, int> const& a, pair<float, int> const& b) -> bool { return a.first > b.first; });
+
+	for (int i = 0; i < Q_W; i++) {
+		y[pairs[i].second] = 1;
+	}
+
+	for (int i = Q_W; i < H_W; i++) {
+		y[pairs[i].second] = 0;
+	}
+
+	delete[] pairs;
+}
+
+DILOF::DILOF(LOFConfiguration& conf) : IncrementalLOF(conf) {
+	this->W = conf.MAX_NUM_INSTANCES;
+	this->H_W = this->W / 2.0f;
+	this->INITIAL_BUFFER_SIZE = this->H_W;
+	this->Q_W = this->H_W / 2.0f;
+}
+
+void DILOF::insertion(Instance* instance) {
+	IncrementalLOF::insertion(instance, true);
+
+	if (dataset.getNumInstances() == W) {
+		summarize();
+	}
+}
