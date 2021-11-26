@@ -1,4 +1,4 @@
-# Novel-Clustering-and-Outlier-Detection
+# Unsupervised Anomaly Detection in the Streaming Environment
 Concepts Involved: Dynamic Tree, Graph and Tree Traversal, Window Time, Unsupervised Machine Learning, Clustering, Instance Selection, Python, Data Science
 
 # Requirements
